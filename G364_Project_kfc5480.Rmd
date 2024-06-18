@@ -1,0 +1,792 @@
+---
+title: "Final Project"
+date: "`r Sys.Date()`"
+author: "kfc5480"
+output:
+  rmdformats::downcute:
+    highlight: kate
+    toc-level: 4
+---
+
+```{r setup, include=FALSE}
+## Global options
+knitr::opts_chunk$set(cache = TRUE,message=FALSE,warning=FALSE)
+```
+
+# Lab Set Up
+
+## Load libraries/apps
+
+```{r}
+ library(sp)
+ library(sf)
+ library(tmap)
+ library(tidyverse)
+ library(readxl)
+ library(elevatr)
+ library(spatstat)
+ library(car)
+ library(plotly)
+
+ library(knitr)
+ library(leaflet)
+ library(dplyr)
+ library(htmltools)
+ library(ggplot2)
+ library(rmapshaper)
+ library(ggstatsplot)
+ library(hrbrthemes)
+```
+
+## About the Dataset
+
+The dataset is on the biochar produced by farmers connected with PlantVillage,[^1] which is a Penn State lab that I've been working with. This dataset is collected by the PlantVillage team which has members in various countries such as Burkina Faso, Thailand, and Kenya. This data is important since the team is interested in increasing biochar production in countries with little arable land to help improve yield while also allowing farmers to take part in carbon offset schemes. In the case of carbon offset, ensuring the accuracy of biochar data improves the credibility of farmers participating in the carbon offset program.
+
+[^1]: PlantVillage website: <https://plantvillage.psu.edu/>
+
+For the purpose of this project I will be reviewing the data within Kenya. I am interested in reviewing the kinds of feedstock used for biochar, the amount of biochar produced, and the difference in time for collecting and uploading the information.
+
+# Read in Data
+
+```{r}
+biochar <- read_excel("20231122_005851_BiocharData.xlsx")
+```
+
+```{r}
+head(biochar)
+```
+
+To make it easier to view the data, setting non-numeric columns as factors would show the different types and number of values in the dataset.
+
+```{r}
+biochar$country <- as.factor(biochar$country)
+biochar$county <- as.factor(biochar$county)
+biochar$feedstock_name <- as.factor(biochar$feedstock_name)
+biochar$farm_name <- as.factor(biochar$farm_name)
+biochar$feedstock_volume_unit <- as.factor(biochar$feedstock_volume_unit)
+biochar$bag_volume_unit <- as.factor(biochar$bag_volume_unit)
+biochar$standard <- as.factor(biochar$standard)
+biochar$verification_status <- as.factor(biochar$verification_status)
+```
+
+```{r}
+summary(biochar)
+```
+
+The dataset has 13 columns and 1416 rows. The feedstock_name column is the type of feedstock or material used to make the biochar, which is usually leftover biomass waste like corn stalks and weeds. The bag_volume_unit column represents what unit of volume the farm used for biochar. The units are either 20 L bucket, Small Bag of 2 Buckets, Medium Bag of 5 Buckets, and Large Bag of 7 Buckets. The feedstock_volume_unit is the unit of volume used for feedstock. The values in this column tend to be consistent with the bag_volume_unit column, but some entries leave this column blank. The bag_count column represents the amount of bags of biochar made. The standard column shows the kind of biochar production process done at the farm.
+
+The country and county columns where the biochar was produced. In the county column, I noticed that not all entries list the county/state the biochar was made in. The columns, farm_lat and farm_lon are the coordinates of the farm the biochar production was associated with. The column, farm_name is the name of the farm. Survey_lat and survey_lng is where the biochar was physically produced.
+
+The column, collection_timestamp_utc, is the day the biochar was collected in Universal Time Coordinated (UTC). The upload_timestamp_utc column represents when the data was shared to the database in UTC. The verification_status column refers to whether the biochar was correctly made or properly had its process recorded.
+
+## Data Wrangling
+
+### Subsetting
+
+I'm only interested in verified biochar production points so I would need to exclude all other entries.
+
+```{r}
+biochar <- biochar[biochar$verification_status == "verified",]
+```
+
+```{r}
+head(biochar)
+```
+
+### Renaming Columns
+
+To make it easier to plot the data later on a map, I renamed "farm_lat" and "farm_lon" to "lat" and "lon" respectively.
+
+```{r}
+names(biochar)
+```
+
+```{r}
+names(biochar)[3] <- "lat"
+
+names(biochar)[4] <- "lon"
+```
+
+### Summarizing Data
+
+I'm interested in the average location of each biochar feedstock type and average amounts of bags produced. This is done by summarizing based on each feedstock type.
+
+```{r}
+biochar.summary.type <- group_by(biochar, by= feedstock_name) %>%
+                          summarise(mean(lat),
+                                    mean(lon),
+                                    mean(bag_count)
+                                    )
+biochar.summary.type
+```
+
+### Creating Numeric Marks
+
+This is mainly done to address the need for numeric marks in the Regression section of the project. Based on the dataset I have, the bag count and timestamp columns are easiest to turn into numeric marks. Both code chunks in this section reference ChatGPT.
+
+#### Biochar Totals Column
+
+```{r}
+biochar$Multiplier <- ifelse(biochar$bag_volume_unit == "Biochar - Medium Bag of 5 buckets", 100,
+                             ifelse(biochar$bag_volume_unit == "Biochar - Large Bag of 7 buckets", 140,
+                                    ifelse(biochar$bag_volume_unit == "Biochar - Small Bag of 2 buckets", 40,
+                                           ifelse(biochar$bag_volume_unit == "20l Bucket", 20, 20)))) 
+#again, 100 to represent 5 20L buckets, 140 to represent 7 20L, and 20 to represent 1 20L bucket
+
+# Multiply the Count column by the Multiplier
+biochar$total <- biochar$bag_count * biochar$Multiplier
+
+# Print the updated data frame
+head(biochar)
+```
+
+#### Hour of Upload
+
+```{r}
+# Convert UTC timestamps to POSIXct
+biochar$upload_timestamp_utc <- as.POSIXct(biochar$upload_timestamp_utc, tz = "UTC")
+
+biochar$timestamps_eat <- with_tz(biochar$upload_timestamp_utc, tzone = "Africa/Nairobi")
+
+# Extract the hour component
+biochar$hours <- format(biochar$timestamps_eat, "%H")
+
+biochar$hours <- as.numeric(biochar$hours)
+
+head(biochar)
+```
+
+```{r}
+summary(biochar)
+```
+
+### Spatial Wrangling
+
+```{r}
+biochar_sf  <- st_as_sf(biochar,coords=c("lon","lat"),crs=4326)
+
+# change the map projection to UTM
+biochar_utm <- st_transform(biochar_sf,crs=26918)
+```
+
+```{r}
+tmap_mode("view") 
+qtm(biochar_utm)
+```
+
+#### Subsetting for Point Pattern Analysis
+
+Since the points in the originally data is so spread out, in order to do the point pattern analysis I need to focus on a smaller area. For the analysis I will focus on Siaya county.
+
+```{r}
+county <- read_sf("Kenya_Counties.shp")
+```
+
+```{r}
+siaya.sf <- subset(county,COUNTY_NAM== "Siaya")
+```
+
+```{r}
+# make sure they are the same map projection
+biochar.sf  <-  st_transform(biochar_sf,4326)
+siaya.sf  <-  st_transform(siaya.sf,4326)
+
+# and crop and save to a new thing
+siaya.biochar.sf <- ms_clip(target = biochar.sf, clip = siaya.sf, remove_slivers = TRUE)
+
+# change the map projection back
+biochar.sf  <-  st_transform(biochar.sf,26918)
+siaya.sf  <-  st_transform(siaya.sf,26918)
+siaya.biochar.sf  <-  st_transform(siaya.biochar.sf,26918)
+```
+
+```{r}
+tmap_mode("view") 
+qtm(siaya.biochar.sf)
+```
+
+# Analysis
+
+## Charts
+
+### Feedstock
+
+I want to examine how many times a certain type of feedstock is used in biochar production.
+
+```{r}
+feedstock <- ggplot(biochar, aes(x=fct_infreq(feedstock_name)))+
+  geom_bar(stat="count", width=0.7, fill="orange")+
+  theme(axis.text.x = element_text(angle = 0))
+
+feedstock + ggtitle("Frequency of Feedstock Type") +
+  xlab("Feedstock Type") + ylab("Number of Times Produced")
+```
+
+The bar plot shows how the most used feedstocks are corn stalk, sugar cane, and prosopsis juliflora (P. juliflora).
+
+It is important to note that this reflects the amount of times biochar was produced with these feedstocks, but NOT the total bags of biochar produced by each type.
+
+### Total Biochar
+
+I'm interested in viewing the total amount of bags generated for each type of feedstock. The data entries vary in the volume units used (Medium Bag of 5 buckets, Large Bag of 7 buckets, etc.). There is a column on the amount bags produced per instance so we can combine this data to find the total types of bags made for each feedstock.
+
+One way to do this is to have a subset based on each unit type and add the total amount of bags made from each feedstock. Assume each bucket is 20 L. Some data points do not have a volume unit listed, so we will ignore those entries for the purpose of this analysis.
+
+```{r}
+m_biochar <- biochar[biochar$bag_volume_unit == "Biochar - Medium Bag of 5 buckets",]
+
+l_biochar <- biochar[biochar$bag_volume_unit == "Biochar - Large Bag of 7 buckets",]
+```
+
+```{r}
+#Creating "total" columns for each subset based on the unit types.
+
+m_biochar$total <- m_biochar$bag_count * 100 # each m_biochar has five buckets, so if each bucket is 20 L, multiply it by 5 to get 100
+
+l_biochar$total <- l_biochar$bag_count * 140 #7 20L buckets = 140 L in total
+```
+
+```{r}
+head(m_biochar)
+```
+
+#### Medium Bag
+
+I'm subsetting each feedstock type's totals so that we can get their respective volumes.
+
+```{r}
+
+cornstalk <- subset(m_biochar, feedstock_name == "Corn stalk")$total
+
+sugarcane <- subset(m_biochar, feedstock_name == "Sugar cane")$total
+
+pjuliflora <- subset(m_biochar, feedstock_name == "Prosopsis juliflora")$total
+
+maizedigest <- subset(m_biochar, feedstock_name == "Maize digestate")$total
+
+wood <- subset(m_biochar, feedstock_name == "Waste wood")$total
+
+```
+
+```{r}
+cornstalk_sum_m <- sum(cornstalk)
+
+sugarcane_sum_m <- sum(sugarcane)
+
+pjuliflora_sum_m <- sum(pjuliflora)
+
+maizedigest_sum_m <- sum(maizedigest)
+
+wood_sum_m <- sum(wood)
+```
+
+```{r}
+print(cornstalk_sum_m)
+
+print(pjuliflora_sum_m)
+```
+
+#### Large Bag
+
+Repeat the previous procedure for the large bags.
+
+```{r}
+
+cornstalk <- subset(l_biochar, feedstock_name == "Corn stalk")$total
+
+sugarcane <- subset(l_biochar, feedstock_name == "Sugar cane")$total
+
+pjuliflora <- subset(l_biochar, feedstock_name == "Prosopsis juliflora")$total
+
+maizedigest <- subset(l_biochar, feedstock_name == "Maize digestate")$total
+
+wood <- subset(l_biochar, feedstock_name == "Waste wood")$total
+
+```
+
+```{r}
+cornstalk_sum_l <- sum(cornstalk)
+
+sugarcane_sum_l <- sum(sugarcane)
+
+pjuliflora_sum_l <- sum(pjuliflora)
+
+maizedigest_sum_l <- sum(maizedigest)
+
+wood_sum_l <- sum(wood)
+```
+
+```{r}
+cornstalk_sum <- sum(cornstalk_sum_m, cornstalk_sum_l)
+
+print(cornstalk_sum)
+
+pjuliflora_sum <- sum(pjuliflora_sum_m, pjuliflora_sum_l)
+
+print(pjuliflora_sum)
+```
+
+For easier viewing and processing, I put the medium and large bag data in the same table.
+
+```{r}
+feedstock_col <- c("Corn stalk", "Sugar cane", "Prosopsis juliflora", "Maize digestate","Waste wood")
+
+sum_m_col <- c(cornstalk_sum_m, sugarcane_sum_m, pjuliflora_sum_m, maizedigest_sum_m, wood_sum_m)
+
+sum_l_col <- c(cornstalk_sum_l, sugarcane_sum_l, pjuliflora_sum_l, maizedigest_sum_l, wood_sum_l)
+
+feedstock_df <- data.frame(Feedstock = feedstock_col, Med_Sum = sum_m_col, Lrg_Sum = sum_l_col)
+```
+
+```{r}
+head(feedstock_df)
+```
+
+Note how only P. juliflora uses the larger unit.
+
+I'm changing the units from L to cubic meters so it's easier to view the numbers.
+
+```{r}
+feedstock_df$TotalL <- feedstock_df$Med_Sum + feedstock_df$Lrg_Sum
+
+feedstock_df$Totalm3 <-feedstock_df$TotalL/1000
+```
+
+```{r}
+head(feedstock_df)
+```
+
+```{r}
+ggplot(feedstock_df, aes(x = Feedstock, y = Totalm3)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  labs(title = "Total Biochar Produced by Feedstock", x = "Feedstock Type", y = "Total (m^3)") +
+  theme_minimal()
+```
+
+The bar plot shows that an overwhelming majority of biochar was made from corn stalk. This is a large contrast between the frequency of usage for each feedstock, where corn stalk, sugar cane, and P. juliflora had roughly the same amount. Despite being produced at the same rate of corn stalk, both sugar cane and P. juliflora did not generate the same volume of biochar as corn stalk.
+
+### Biochar Standard
+
+The biochar standards in this dataset are dictated by Carbon Standards International,[^2] which provide guidelines on how biochar is produced in low, lower middle and higher middle income countries. These standards serve the purpose for monitoring biochar quality and improving credibility of farmers who plan to partake in carbon offset programs with their biochar. Artisan standards involve the production of biochar using kon-tiki kilns, which is a reduced emissions method. Artisan Pro is biochar produced by a company or association that would later be sent to other farms and industries. Artisan General is biochar made by an individual farmer that will be applied back on their farm.[^3]
+
+[^2]: Carbon Standard International website: <https://www.carbon-standards.com/en/home>
+
+[^3]: Carbon Standards International documentation on artisan standards: <https://www.carbon-standards.com/docs/transfer/36_400EN.pdf>
+
+```{r}
+standard <- ggplot(biochar, aes(x=fct_infreq(standard)))+
+  geom_bar(stat="count", width=0.7, fill="darkgreen")+
+  theme(axis.text.x = element_text(angle = 0))
+
+standard + ggtitle("Frequency of Standard Type") +
+  xlab("Standard Type") + ylab("Number of Times Produced")
+```
+
+```{r}
+table(biochar$standard)
+```
+
+## Mapping
+
+To create labels for each marker, I referenced an article for using Leaflet.[^4]
+
+[^4]: Leaflet Article: <https://www.drdataking.com/post/how-to-add-multiple-lines-label-on-a-leaflet-map/>
+
+```{r}
+labels <- sprintf(
+  "<strong>%s</strong><br/>Feedstock: %s",
+  biochar$farm_name, biochar$feedstock_name, biochar$standard) %>%
+  lapply(htmltools::HTML)
+```
+
+```{r}
+leaflet(biochar) %>%
+  addTiles() %>%
+  addMarkers(lng= biochar$lon,
+             lat= biochar$lat,
+             popup = ~paste(farm_name, "<br>Feedstock:", feedstock_name, "<br>Standard:", standard),
+             label = ~labels,
+  clusterOptions = markerClusterOptions()
+)
+```
+
+The map shows that biochar production occurs in the following Kenyan counties: Baringo, Bungoma, Homa Bay, Kakamega, and Siaya. Of the five counties, the majority of biochar is produced in Baringo. It is important to note that the map is showing the frequency of biochar production in locations, not the amount of biochar producers. Some locations produce biochar more than others, such as the Symon Kitol farm in Baringo with 142 points of biochar production.
+
+Interestingly, the biochar produced in Baringo exclusively uses P. juliflora while in Bungoma and Kakamega, sugar cane is the main feedstock. The remaining counties mainly use corn stalks as their feedstock. These differences are likely due to the difference in resource availability for each location.
+
+# Point Pattern Analysis
+
+The point pattern analysis will be done on Siaya county, which is in southwest Kenya.
+
+```{r}
+siaya_biochar_ppp <- as.ppp(siaya.biochar.sf)
+
+plot(siaya_biochar_ppp,use.marks = F,cex = 1, pch = 4, axes= TRUE)
+```
+
+## Quadrat Analysis
+
+### Table of Counts
+
+```{r}
+Q <- quadratcount(siaya_biochar_ppp, nx = 4, ny = 4)
+print(Q)
+```
+
+### Table of Intensities
+
+```{r}
+intensity(Q)
+```
+
+```{r}
+plot(siaya_biochar_ppp,       
+     use.marks = F,  
+     cex = 0.5, pch = 4, # point size and shape    
+     main="siaya_biochar_ppp quadrat count") # plot title
+
+plot(Q, add = TRUE, cex = 2)  # Now I add Q on top.
+```
+
+### Plot of Intensities
+
+```{r}
+# Plot the intensity
+plot(intensity(Q, image=TRUE), main="Point intensity", las=1)  # Plot intensity raster 
+plot(siaya_biochar_ppp, pch=20, cex=0.6,  add=TRUE)                     # Add points
+```
+
+When viewing the table and plots of intensities, it shows that more biochar production occurs in northern Siaya, especially in northwestern Siaya. This may be due to amount of resources available or the environment of the area.
+
+### Variance Mean Ratio
+
+```{r}
+siaya_biochar_ppp.variance <- var(as.vector(Q)) 
+siaya_biochar_ppp.mean <- mean(as.vector(Q))
+
+siaya_biochar_ppp.VMR <- siaya_biochar_ppp.variance / siaya_biochar_ppp.mean
+print(siaya_biochar_ppp.VMR)
+```
+
+The data is clustered since the VMR is greater than 1.
+
+### Chi-Square Hypothesis
+
+```{r}
+quadrat.test(siaya_biochar_ppp)
+```
+
+H0: The pattern was caused by an Independent Random Process. Any clustering/dispersion is random chance. On average, the VMR = 1
+
+H1: The pattern is unusually DIFFERENT to one caused by an Independent Random Process. The VMR is likely to be unusually high OR unusually low.
+
+Since the p-value is less than 2.2e-16 it indicates that the null hypothesis would rejected. The alternative hypothesis, that the pattern is very unlikely to be caused by an Independent Random Process, is supported.
+
+### MAUP
+
+```{r}
+#Set up different quadrant box sizes
+Q.2_2.Boxes  <- quadratcount(siaya_biochar_ppp, nx = 2, ny = 2) 
+Q.5_4.Boxes  <- quadratcount(siaya_biochar_ppp, nx = 5, ny = 4) 
+Q.10_10.Boxes <- quadratcount(siaya_biochar_ppp, nx = 10, ny = 10)      
+```
+
+```{r}
+# Plot for 2x2 box
+# Plot intensity, then add points, then add numbers
+plot(intensity(Q.2_2.Boxes, image=TRUE), main="", las=1)                
+plot(siaya_biochar_ppp, pch=20, cex=0.6, col=rgb(0,0,0,.5), add=TRUE)    
+plot(Q.2_2.Boxes, add = TRUE, cex = 2,col="white",font=2)
+```
+
+```{r}
+# Plot for 5x4 boxes.
+plot(intensity(Q.5_4.Boxes, image=TRUE), main="", las=1)                
+plot(siaya_biochar_ppp, pch=20, cex=0.6, col=rgb(0,0,0,.5), add=TRUE)    
+plot(Q.5_4.Boxes, add = TRUE, cex = 2,col="white",font=2)               
+```
+
+```{r}
+# Plot for 10x10 boxes.
+plot(intensity(Q.10_10.Boxes, image=TRUE), main="", las=1)                
+plot(siaya_biochar_ppp, pch=20, cex=0.6, col=rgb(0,0,0,.5), add=TRUE)    
+plot(Q.10_10.Boxes, add = TRUE, cex = 2,col="white",font=1)
+```
+
+When modifying the number of quadrats for the the data, the intensity of specific areas of the data change from high intensity to low intensity, despite being in the same location. This is most obvious in the top half of each plot where as the number of quadrants increase, the intensity in those areas decrease. This is an example of the modifiable areal unit problem, where the way the point data is aggregated can lead to different conclusions.
+
+## Kernel Density Smoothing
+
+```{r}
+PointDensity <- density(siaya_biochar_ppp)
+plot(PointDensity)
+
+# Individual events can be added to the plot by adding our original points to the plot.
+ plot(siaya_biochar_ppp, add = TRUE,
+      use.marks = F, cex = 0.5,pch=16) 
+```
+
+```{r}
+# set up 2 subplots in a row
+par(mfrow=c(row=1,col=2),mar=c(1,1,1,1)) 
+
+# Since the points are so spread apart, having a larger bandwidth is necessary to highlight the different clusters
+plot (density(siaya_biochar_ppp, sigma = 2000),main="Bandwidth=2000")
+plot(siaya_biochar_ppp, add = TRUE,use.marks = F, cex = 0.5,pch=16)
+
+plot (density(siaya_biochar_ppp, sigma = 4000),main="Bandwidth=4000")
+plot(siaya_biochar_ppp, add = TRUE,use.marks = F, cex = 0.5,pch=16)
+```
+
+Based on the kernel density analysis, it seems that more biochar production occurs in northwestern and northeastern Siaya. The western cluster has a greater density of points compared to the eastern cluster, indicating that most biochar production in Siaya occurs in this area.
+
+## Nearest Neighbor Analysis
+
+```{r}
+siaya_biochar_nnd <- nndist(siaya_biochar_ppp)/1000
+
+#histogram of nearest neighbors in km
+hist(siaya_biochar_nnd,br=50)
+```
+
+```{r}
+ paste( c("The average nearest neighbour of biochar production instances in Siaya is:"),
+        round(mean(siaya_biochar_nnd),3),"km away")
+```
+
+```{r}
+ paste( c("The minimum nearest neighbour of biochar production instances in Siaya is:"),
+        round(min(siaya_biochar_nnd),3),"km away")
+```
+
+```{r}
+ paste( c("The maximum nearest neighbour of biochar production instances in Siaya is:"),
+        round(max(siaya_biochar_nnd),3),"km away")
+```
+
+For the nearest neighbor analysis, it shows that the average distances between biochar production points are 0.589 km. The smallest nearest neighbor distance is 0.009 km, while the largest is 56.54 km.
+
+### Clarke-Evans Ratio, R
+
+```{r}
+clarkevans.test(siaya_biochar_ppp,
+                alternative="clustered")
+```
+
+The Clarke-Evans ratio, R, is 0.21.
+
+For very disperse data, the Clarke-Evans ratio would be greater than 1 whereas for very clustered data, R would be less than 1. In this case, R shows that the Siaya biochar data is more clustered than random or uniform since it is less than 1.
+
+H0: The pattern is more uniform than clustered, proven when R is greater than 1.
+
+H1: The pattern is more clustered than uniform, proven when R is less than 1.
+
+## L-Function Analysis
+
+```{r}
+# Calculate the L function.
+siaya_biochar_ppp.lest <- Lest(siaya_biochar_ppp,correction = "Ripley")
+
+# Create an ensemble (collection) of simulated point patterns 
+# that is based on our data data, 
+# but the points have been rearranged using an independent random process. 
+# For each one, calculate the L function, lest
+# 
+siaya_biochar_ppp.lest.IRPsimulation <- envelope(siaya_biochar_ppp, 
+                              Lest, correction = "Ripley", 
+                              verbose = F,
+                              nsim=1000, nrank=1, 
+                              savepatterns = FALSE, savefuns = FALSE)
+```
+
+```{r}
+#Find the max and min values
+L.EST.Max<-(max(siaya_biochar_ppp.lest$iso-siaya_biochar_ppp.lest$r))
+L.EST.Min <- 0-L.EST.Max
+
+#The dots are weirdly important here. Copy/paste
+plot(siaya_biochar_ppp.lest,. - r ~ r, ylim=c(L.EST.Min,L.EST.Max))
+
+# Add IRP simulated Lestimates (so many, they merge into a grey cloud)
+plot(siaya_biochar_ppp.lest.IRPsimulation, . - r ~ r,add=TRUE)
+```
+
+The L-function shows that the data is clustered since the observed data (black line), is above the confidence envelope (grey cloud). This suggests that the locations of the biochar production are not caused by a random process and are clustered.
+
+# New Data Set
+
+Examining the different agricultural areas in Kenya[^5] and how it overlaps with biochar production would be interesting to understand. This can highlight areas that can also potentially produce biochar as well as areas where it would be difficult to produce biochar.
+
+[^5]: World Resources Institute: <https://www.wri.org/data/kenya-gis-data>
+
+## Read in and Wrangle Data
+
+```{r}
+ke_ag <- read_sf("ke_agriculture.shp")
+```
+
+```{r}
+ke_ag  <-  st_transform(ke_ag,26918) #convert to UTM
+```
+
+```{r}
+head(ke_ag$AGRICULTUR)
+```
+
+## Mapping
+
+For the agriculture data I'm interested in overlaying the biochar production points onto the agriculture map that notes the different vegetation qualities of the polygons.
+
+```{r}
+
+ag_map <- qtm(ke_ag,"AGRICULTUR",fill.palette="Greens") + tm_layout(legend.outside = TRUE)
+
+biochar_map <- qtm(biochar.sf,dots.col = "feedstock_name" , dots.palette="Set1") + 
+  tm_layout(legend.outside = TRUE)
+
+ag_biochar <- ag_map + biochar_map
+```
+
+```{r}
+ag_biochar
+```
+
+From viewing the map, it is hard to conclude for sure that there is a pattern in the type of feedstock used and the agricultural land type due to the lack of data. Though based off the map, it seems that corn stalk feedstock tend to be used in areas with scattered vegetation, which has a field density of 20-40%. The other types of feedstock, seem to appear in areas with rainfed herbaceous crops.
+
+# Regression
+
+## Predictors and Response
+
+Two numeric marks I am interested in viewing is the connection of the amount of biochar produced to the time biochar production is finished. I think earlier in the day or the afternoon would tend to have larger amounts of biochar produced. The time of day would be the predictor and the amount of biochar produced would be the response.
+
+The bag count data and the hours data are the only numeric columns of marks from the biochar dataset so I'm considering them as "nonsense variables." I don't expect a relationship between the two variables, especially since there is not much variation in the biochar totals data.
+
+## Histogram
+
+```{r}
+## plot
+gghistostats(
+  data       = biochar.sf, ## dataframe from which variable is to be taken
+  x          = total, ## numeric variable whose distribution is of interest
+  title      = "Total Biochar in L", ## title for the plot
+  caption    = "Source: PlantVillage",
+  type = "nonparametric",
+  xlab = "Liters",subtitle=FALSE,
+  ggthemes::theme_tufte(),
+  binwidth   = 1000) ## binwidth value (experiment)
+```
+
+The biochar totals data is also skewed to the right, with a median value of 140 L. There are also several outliers, which represent instances where multiple bags are produced at a time.
+
+```{r}
+## plot
+gghistostats(
+  data       = biochar.sf, ## dataframe from which variable is to be taken
+  x          = hours, ## numeric variable whose distribution is of interest
+  title      = "Biochar Upload in EAT", ## title for the plot
+  caption    = "Source: PlantVillage",
+  type = "nonparametric",
+  xlab = "Hour",subtitle=FALSE,
+  ggthemes::theme_tufte(),
+  binwidth   = 1) ## binwidth value (experiment)
+```
+
+## Map
+
+```{r}
+#maptot <- qtm(biochar.sf, "hours", dots.col = ="Greens")+ tm_layout(legend.outside = TRUE)
+
+map_tot <- qtm(biochar.sf, dots.col="total", dots.size=.1,dots.palette="Greens")+
+  tm_layout(legend.outside = TRUE)
+
+map_hr <- qtm(biochar.sf, dots.col="hours", dots.size=.1,dots.palette="Blues")+
+  tm_layout(legend.outside = TRUE)
+```
+
+```{r}
+map_tot
+```
+
+```{r}
+map_hr
+```
+
+As expected, the hours and biochar totals do not seems to correlate with each other. Though I did find it interesting to look at the regional differences of the variables. For example, instances of biochar production greater than 5000 bags of biochar are all located towards the southwest of the extent. When it comes to hours, there doesn't seem to be a pattern for when biochar production is done.
+
+In general this analysis has supported my expectation that there is no relation between the variables.
+
+## Scatterplot
+
+```{r}
+# create the plot, save it as "p" rather than print immediately
+myplot <-   ggplot(biochar.sf, aes(x=hours, y=total,color=hours)) + 
+            geom_point(alpha=.5) +
+            theme_classic()+
+            scale_color_gradient(low="blue", high="red")
+
+# and plot interactively
+ggplotly(myplot)
+```
+
+## Linear Regression
+
+```{r}
+LinearFit <- lm(total ~ hours, data = biochar.sf, na.action="na.exclude")
+
+biochar.sf$ModelledOutput   <- predict(LinearFit)
+biochar.sf$Linear.Residuals <- residuals(LinearFit)
+
+# with linear trend
+ggplot(biochar.sf, aes(x=hours, y=total)) +
+  geom_point() +
+  geom_smooth(method=lm , color="red", se=FALSE) +
+  theme_ipsum()
+```
+
+```{r}
+LinearFit
+```
+
+The regression equation is $\hat{total} = 440.7 + 248.2(hours)$.
+
+## Mapping Output
+
+```{r}
+# your actual response variable observations
+qtm(biochar.sf,dots.col = "total" , dots.palette="Blues") + 
+  tm_layout(legend.outside = TRUE)
+
+# the value of your model at each location e.g. what does the line of best fit suggest 
+qtm(biochar.sf,dots.col = "ModelledOutput",dots.palette="Greens") + 
+  tm_layout(legend.outside = TRUE)
+
+# the residuals 
+qtm(biochar.sf,dots.col = "Linear.Residuals",dots.palette="-RdBu") + 
+  tm_layout(legend.outside = TRUE)
+```
+
+There are some areas of the model that does a slightly better job. This can be seen with the linear residuals map, where the lighter shades of blue are located towards the top of the extent, in Bungoma, Kakamega, and Baringo. Even so, the range of each value is likely has a larger magnitude than zero. There are some clear outliers, where points are either very dark blue or dark red. This can be seen with four points on the edge of the extent. There are three residuals with a value less than -5000 in Bungoma, Gishu, and Baringo. One outlying positive residual is located in Homa Bay.
+
+Overall, I still believe that there is poor correlation between the hour of biochar production and total biochar produced.
+
+```{r}
+summary(biochar.sf$Linear.Residuals)
+```
+
+## Autocorrelation
+
+Based off of the maps above, I believe the spatial data, at least for the biochar totals and time of day for production, are independent from each other. This is due to the large residuals.
+
+Though, I do believe there are other factors that can lead to certain biochar total values that is not shown by the numeric marks that my dataset has. For instance, the map of the totals show that areas in the northern part of the extent tend to have lower totals than the southern part of the extent. I can use a Moran's I and Moran's scatterplot to assess if this is true or not. I can determine the neighbor of points based on distance and have a weight assigned to those neighboring points. By using the Monte Carlo method I can use several simulations to test if the pattern of points are from a random process or not. Plotting the data can further help with understanding if areas of higher totals tend to be near points of high totals and vice versa, indicating a positive correlation.
+
+# Conclusion
+
+Throughout the report, I have used biochar data in Kenya to better understand any patterns that may occur. First, I conducted an exploratory analysis by producing charts and maps of the data. When examining the types of feedstock used, the weed, P. juliflora is used the most by farmers, but ultimately corn stalk has a greater output of biochar. I also reviewed the frequency of biochar standard type, which is used for monitoring biochar quality for carbon credits. The majority of the biochar uses the stricter standard, Artisan Pro. As for the locations of biochar production, it occurs in five counties: Baringo, Bungoma, Homa Bay, Kakamega, and Siaya. Biochar is most frequently made in Baringo, with P. juliflora being the county's main feedstock.
+
+For my point pattern analysis I narrowed down my scope to Siaya county. I found that biochar production mainly occurs in northwestern Siaya, with points appearing more clustered than uniform. Points of biochar production in Siaya tend to be 0.589 km away from each other.
+
+I looked into the potential connection between feedstock and the type of agricultural land. Due to the lack of more biochar data, I could not make a firm conclusion about whether there was a relationship between the two. However, it does appear that corn stalk as a feedstock is common in areas with a vegetation density ranging from 20-40%.
+
+For the regression, I reviewed the relationship between total biochar production and the time of day biochar was made. I decided to use these variables since these were my only numeric marks from the biochar dataset. I did not expect to find a connection between the two, especially since there was little variation in the totals data. In the end, my initial beliefs remained the same, but it was still valuable practice for understanding how to use and interpret the regression functions.
+
+I believe more can be done in future research. With a larger biochar dataset I believe I could do a more comprehensive analysis why certain patterns occur, such as why certain feedstocks occur in a particular region more than others or why a region makes more biochar than other. I can also take a closer look into what areas can produce biochar based on additional factors such as land type, population size, and poverty levels.
