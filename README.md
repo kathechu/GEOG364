@@ -1,4 +1,4 @@
-# GEOG 364: Spatial Analysis - Biochar Production in Kenya
+# GEOG 364: Spatial Analysis in R - Biochar Production in Kenya
 
 ## Introduction
 
