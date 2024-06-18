@@ -21,5 +21,5 @@ I believe more can be done in future research. With a larger biochar dataset I b
 
 ## Acknowledgments
 
-* [Helen Greatrex](https://www.geog.psu.edu/directory/helen-greatrex), for guidance as the GEOG 364 professor.
+* [Dr. Helen Greatrex](https://www.geog.psu.edu/directory/helen-greatrex), for guidance as the GEOG 364 professor.
 * [PlantVillage](https://plantvillage.psu.edu/), for providing resources for the research.
