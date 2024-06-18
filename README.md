@@ -1,5 +1,6 @@
-# GEOG 364: Spatial Analysis in R - Biochar Production in Kenya
-
+# Biochar Production in Kenya
+### GEOG 364: Spatial Analysis in R
+### Fall 2023
 ## Introduction
 
 The dataset is on the biochar produced by farmers connected with [PlantVillage](https://plantvillage.psu.edu/), which a Penn State lab that I’ve worked with. This dataset is collected by the PlantVillage team which has members in various countries such as Burkina Faso, Thailand, and Kenya. This data is important since the team is interested in increasing biochar production in countries with little arable land to help improve yield while also allowing farmers to take part in carbon offset schemes. In the case of carbon offset, ensuring the accuracy of biochar data improves the credibility of farmers participating in the carbon offset program.
